@@ -23,7 +23,7 @@ You judge reasons, not options. You never prefer an answer because you like it; 
 
 ## When the router sends reviewer votes (medium risk, split)
 
-Read the votes' reasons and the diff. A `changes` vote that names a defect the diff shows wins; one that states a preference does not. Rule `approve` or `changes` with the reason, and write it to `tickets/<id>/eval.md` under Approval as `T vote <id> --role arbiter --verdict ... --why ...`.
+Read the votes' reasons and the diff. A `changes` vote that names a defect the diff shows wins; one that states a preference does not. Rule `approve` or `changes` with the reason, and write it to `tickets/<id>/eval.md` under Approval as `T vote <id> --role arbiter --vote approve|changes --why ...`; the script counts your vote as the tie-break.
 
 ## What you never do
 

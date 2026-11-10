@@ -3,51 +3,76 @@
 
 Active only in a repository that has tickets/CONFIG.md (a factory repository); elsewhere it allows everything.
 
-PreToolUse (Bash): exit 2 on a push to main/master, a force push, a remote branch deletion, and the common
-destructive commands. The message tells the agent to leave the step to a person.
-TaskCompleted: exit 2 when the task names a ticket whose eval.md carries no accepted verdict.
+PreToolUse (Bash): exit 2 on a push to main/master, a force push, a remote branch deletion, destroying the
+integration or main branch, a recursive delete outside the working directory, destructive SQL, deploys and
+infrastructure changes, migrations, and GitHub deletions or permission changes. Each segment of a compound
+command (;, &&, ||, |, newline) is tested on its own; options between the tool and its verb are allowed for.
+Out of reach, by design: commands hidden in quoting, variables, aliases, scripts or `bash -c` strings — the
+guard stops the plain forms an agent types, it is not a sandbox.
+TaskCompleted: exit 2 when the task names a ticket whose eval.md is missing or carries no accepted verdict
+signed by a checker (the same line tickets.py checks: `- Verdict: accepted` inside "Checker's verdict").
 """
 import json, os, re, sys
 
+OPTS = r"(?:\s+-\S+(?:\s+[^-\s]\S*)?)*"   # options between a tool and its verb: git -C x push, kubectl -n ns apply
+RULES = [
+    (rf"\bgit{OPTS}\s+push\b(?![^;&|\n]*--dry-run)[^;&|\n]*\b(main|master)\b", "push to main or master"),
+    (rf"\bgit{OPTS}\s+push\b[^;&|\n]*(\s--force\b|\s-f\b|\s--force-with-lease\b|\s\+\S+)", "force push"),
+    (rf"\bgit{OPTS}\s+push\b[^;&|\n]*(\s--delete\b|\s-d\b|\s:\S)", "deleting a remote branch"),
+    (rf"\bgit{OPTS}\s+(reset\s+--hard|clean\s+-\S*f|branch\s+(-D|-d|--delete))\b[^;&|\n]*\b(main|master|integration)\b", "destroying the integration or main branch"),
+    (r"\brm\s+(?:-\S*r\S*|--recursive)(?:\s+-\S+|\s+--\S+)*\s+(?P<target>\S+)", "recursive delete"),
+    (r"\b(DROP\s+(TABLE|DATABASE|SCHEMA)|TRUNCATE\s+TABLE|DELETE\s+FROM\s+\w+\s*;)", "destructive SQL"),
+    (rf"\b(terraform|tofu){OPTS}\s+(apply|destroy)\b|\bkubectl{OPTS}\s+(apply|delete)\b|\bhelm{OPTS}\s+(install|upgrade|uninstall)\b|\bfly{OPTS}\s+deploy\b|\bvercel\b[^;&|\n]*--prod\b|\bgcloud\b[^;&|\n]*\bdeploy\b|\baws\b[^;&|\n]*\b(deploy|delete)\b", "deploy or infrastructure change"),
+    (r"\b(prisma\s+migrate\s+deploy|alembic\s+upgrade|rails\s+db:migrate|knex\s+migrate:latest|flyway\s+migrate)\b", "running a migration"),
+    (r"\bgh\s+(repo\s+delete|secret\s+set|api\b[^;&|\n]*(-X\s*DELETE|--method\s+DELETE))", "GitHub permission or deletion change"),
+]
+VERDICT_RE = re.compile(r"^- Verdict:\s*(accepted|returned)\s*$", re.M)   # the same line as tickets.py VERDICT_RE; keep them identical
+CHECKED_BY_RE = re.compile(r"^- Checked by:\s*(\S.*)$", re.M)
+
+
+def segments(cmd):
+    return [s.strip() for s in re.split(r"\s*(?:;|&&|\|\||\||\n)\s*", cmd) if s.strip()]
+
+
+def check_bash(cmd, cwd):
+    """The reason this command is refused, or None."""
+    for seg in segments(cmd):
+        for pat, why in RULES:
+            m = re.search(pat, seg, re.I)
+            if not m: continue
+            if why == "recursive delete":
+                target = m.group("target").strip("'\"")
+                if not (target.startswith("/") or target.startswith("~") or target.startswith("$") or target.startswith("..")): continue   # a relative path inside the worktree is ordinary cleanup
+                if target.startswith("/") and os.path.abspath(target).startswith(os.path.abspath(cwd) + os.sep): continue
+                why = "recursive delete outside the working directory"
+            return f"{why} is on the never-automated list. Leave this step to a person; record it in the ticket as 'stops for a person'. Segment: {seg[:160]}"
+    return None
+
+
+def check_task(root, text):
+    """The reason a task naming a ticket may not close, or None. Fails closed when the evidence is missing."""
+    ids = sorted(set(re.findall(r"\b(T-\d{3,})\b", text)))
+    for tid in ids:
+        ev = os.path.join(root, "tickets", tid, "eval.md")
+        if not os.path.isfile(ev): return f"{tid} has no eval.md; a task closes on evidence, not on a claim."
+        s = open(ev, encoding="utf-8").read()
+        sec = re.search(r"^## Checker's verdict\s*\n(.*?)(?=^## |\Z)", s, re.S | re.M | re.I)
+        body = sec.group(1) if sec else ""
+        m = VERDICT_RE.search(body)
+        if not (m and m.group(1) == "accepted" and CHECKED_BY_RE.search(body)): return f"{tid} has no accepted verdict signed by a checker in eval.md; a task closes on evidence, not on a claim."
+    return None
+
 
 def main():
-    try:
-        event = json.load(sys.stdin)
-    except Exception:
-        return 0
+    try: event = json.load(sys.stdin)
+    except Exception: return 0
     root = event.get("cwd") or os.getcwd()
-    if not os.path.isfile(os.path.join(root, "tickets", "CONFIG.md")):
-        return 0
+    if not os.path.isfile(os.path.join(root, "tickets", "CONFIG.md")): return 0
     name = event.get("hook_event_name", "")
-    if name == "PreToolUse":
-        cmd = (event.get("tool_input") or {}).get("command", "") or ""
-        rules = [
-            (r"git\s+push\b(?!.*--dry-run).*\b(main|master)\b", "push to main or master"),
-            (r"git\s+push\b.*(--force|-f\b|\+refs)", "force push"),
-            (r"git\s+push\b.*(--delete|:refs/heads/|\s:\S)", "deleting a remote branch"),
-            (r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+(/|~|\$HOME|\.\.)", "recursive delete outside the worktree"),
-            (r"\bgit\s+(reset\s+--hard|clean\s+-[a-zA-Z]*f|branch\s+-D)\b.*\b(main|master|integration)\b", "destroying the integration or main branch"),
-            (r"\b(DROP\s+(TABLE|DATABASE|SCHEMA)|TRUNCATE\s+TABLE|DELETE\s+FROM\s+\w+\s*;)", "destructive SQL"),
-            (r"\b(terraform|tofu)\s+(apply|destroy)\b|\bkubectl\s+(apply|delete)\b|\bhelm\s+(install|upgrade|uninstall)\b|\bfly\s+deploy\b|\bvercel\s+--prod\b|\bgcloud\s+.*\bdeploy\b|\baws\s+.*\b(deploy|delete)\b", "deploy or infrastructure change"),
-            (r"\b(prisma\s+migrate\s+deploy|alembic\s+upgrade|rails\s+db:migrate|knex\s+migrate:latest|flyway\s+migrate)\b", "running a migration"),
-            (r"\bgh\s+(repo\s+delete|secret\s+set|api\s+.*-X\s+DELETE)\b", "GitHub permission or deletion change"),
-        ]
-        for pat, why in rules:
-            if re.search(pat, cmd, re.I | re.S):
-                print(f"factory guard: {why} is on the never-automated list. Leave this step to a person; record it in the ticket as 'stops for a person'. Command: {cmd[:160]}", file=sys.stderr)
-                return 2
-        return 0
-    if name == "TaskCompleted":
-        text = " ".join(str(event.get(k, "")) for k in ("task_subject", "task_description"))
-        m = re.search(r"\b(T-\d{3,})\b", text)
-        if not m:
-            return 0
-        ev = os.path.join(root, "tickets", m.group(1), "eval.md")
-        if not os.path.isfile(ev):
-            return 0
-        if not re.search(r"^- Verdict:\s*accepted\s*$", open(ev, encoding="utf-8").read(), re.M):
-            print(f"factory guard: {m.group(1)} has no accepted verdict in eval.md; a task closes on evidence, not on a claim.", file=sys.stderr)
-            return 2
+    why = None
+    if name == "PreToolUse": why = check_bash((event.get("tool_input") or {}).get("command", "") or "", root)
+    elif name == "TaskCompleted": why = check_task(root, " ".join(str(event.get(k, "")) for k in ("task_subject", "task_description")))
+    if why: print("factory guard: " + why, file=sys.stderr); return 2
     return 0
 
 

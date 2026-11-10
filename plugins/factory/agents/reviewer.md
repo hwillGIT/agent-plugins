@@ -17,6 +17,6 @@ Use an installed specialist when the project has one, and read its report rather
 - **schema**: constraints present, types tight, foreign keys indexed, migration reversible and safe on a live table, no soft-delete reflex.
 - **reader**: the document answers the outcome for the named reader, every figure has a source, the required sections are present, and a reader who stops after the first screen still leaves with the point.
 
-Vote: `T vote <id> --role <surface> --verdict approve|changes --why "<one line per finding: file:line or evidence file, what is wrong, what would make it right>"`. A `changes` vote names at least one concrete defect; a preference with no defect behind it is `approve` with the preference noted. After the worker's labelled fix, read only the fix and vote once more.
+Vote: `T vote <id> --role <surface> --vote approve|changes --why "<one line per finding: file:line or evidence file, what is wrong, what would make it right>"`. A `changes` vote names at least one concrete defect; a preference with no defect behind it is `approve` with the preference noted. After the worker's labelled fix, read only the fix and vote once more.
 
 Report to the router in one line: the ticket, your surface, your verdict, the finding count.
