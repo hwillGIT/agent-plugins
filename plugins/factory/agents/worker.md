@@ -21,5 +21,6 @@ Rules:
 - A document or analysis ticket: write the deliverable at the path in `rd.md`, tie every figure to a source named in the file, mark estimates as estimates. Same branch, evidence and report rules.
 - A bug outside your ticket goes to `tickets/INBOX.md` in two lines; you do not fix it.
 - After a restart, read your branch's `git log` and `notes.md` before repeating a step.
+- Before your final report, write your session's token count to `notes.md` when it is shown to you (`tokens: N`); the merger logs it. Never estimate it.
 
 Report (under 100 words plus the evidence table): status `ready` | `question` | `blocked` | `failed`; what changed in one sentence; the evidence table; the question block if status is `question`.

@@ -28,11 +28,14 @@ interleave a check with a write.
   vote T-003 --role security --vote approve|changes --why "..."
   verdict T-003                               approve | changes | escalate, from gate, checker, votes, CONFIG.md
   rework F-001|T-003 --note "..." [--overrides D-014] [--owns ...] [--risk ...] [--kind ...]
-  log T-003 --minutes 23 [--attempt 1 --questions 1 --returned 0 --defects 0 --restarts 0 --tokens N]
+  log T-003 --minutes 23 [--attempt 1 --questions 1 --returned 0 --defects 0 --restarts 0 --tokens N --role worker|panel|review|score]
   stats                                       throughput, first-pass rate, decisions by maker, override share
   dashboard                                   write tickets/dashboard.html   (alias: html)
   import-issue 42 [--kind ...] [--feature F-001]   a draft ticket from a GitHub issue (gh CLI)
   pr F-001|T-003 [--base main]                push the integration branch and open the pull request (gh CLI)
+  sample                                      done tickets due for scoring (by risk-weighted sampling; reworked ones always)
+  score T-003 --scorer task-compliance --label compliant --why "..."   record a judge's label; SCORES.md
+  bench add T-003 | bench list | bench record T-003 --model opus --passed 7/8 --minutes 22 [--tokens N]
 
 Exit codes: 0 ok · 1 error (message on stderr, prefixed "error:") · validate 2 when any ticket has problems ·
 gate 2 FAIL · verdict 2 changes, 3 escalate. Commands that create something print the new id on the first line.
@@ -54,14 +57,17 @@ LIST_KEYS = ("owns", "depends", "reviews", "tickets")
 RD_HEADINGS = ("Outcome", "Context the worker needs", "Constraints", "Out of scope", "Open questions")
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEMPLATES = os.path.join(HERE, "templates") if os.path.isdir(os.path.join(HERE, "templates")) else os.path.join(HERE, "..", "templates")
-SHARED = ["CONFIG.md", "DECISIONS.md", "BOARD.md", "RUN.md", "ALLOWLIST.md", "INBOX.md", "checks.sh"]
+SHARED = ["CONFIG.md", "DECISIONS.md", "BOARD.md", "RUN.md", "ALLOWLIST.md", "INBOX.md", "checks.sh", "SCORES.md", "BENCH.md"]
 RUN_COLS = ("Ticket", "Attempt", "Started", "Ended", "Minutes", "Questions asked", "Returned by checker",
-            "Defects found after acceptance", "Restarts recovered", "Tokens (if known)")
+            "Defects found after acceptance", "Restarts recovered", "Tokens (if known)", "Role")
+ROLES = ["worker", "panel", "review", "score", "bench", "other"]
+SCORERS_DIR = "scorers"
+BENCH_DIR = "bench"
 VERDICT_RE = re.compile(r"^- Verdict:\s*(accepted|returned)\s*$", re.M)   # guard.py checks the same line; keep the two identical
 CHECKED_BY_RE = re.compile(r"^- Checked by:\s*(\S.*)$", re.M)
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n(.*)\Z", re.S)
 ID_RE = re.compile(r"^[TF]-\d{3,}$")
-MUTATING = {"init", "feature", "new", "status", "ready", "decide", "resolve", "gate", "vote", "rework", "log", "import-issue", "pr"}
+MUTATING = {"init", "feature", "new", "status", "ready", "decide", "resolve", "gate", "vote", "rework", "log", "import-issue", "pr", "score", "bench"}
 
 
 # ---------------------------------------------------------------- where state lives
@@ -248,7 +254,9 @@ def replace_section(body, heading, content):
 # ---------------------------------------------------------------- config
 
 DEFAULT_CONFIG = {"branch": "integration", "promote": "pr", "concurrency": 3, "paused": False,
-                  "approval": {"low": "checker", "medium": "majority", "high": "unanimous"}}
+                  "approval": {"low": "checker", "medium": "majority", "high": "unanimous"},
+                  "scoring": {"low": 25, "medium": 50, "high": 100},
+                  "price_per_million_tokens": 0}
 
 
 def config():
@@ -259,8 +267,12 @@ def config():
         if m:
             found = parse_frontmatter(m.group(1)); c.update(found)
             if isinstance(found.get("approval"), dict): c["approval"] = {**DEFAULT_CONFIG["approval"], **found["approval"]}
+            if isinstance(found.get("scoring"), dict): c["scoring"] = {**DEFAULT_CONFIG["scoring"], **found["scoring"]}
+            else: c["scoring"] = dict(DEFAULT_CONFIG["scoring"])
     c["concurrency"] = int(c.get("concurrency") or 3)
     c["paused"] = str(c.get("paused")).lower() == "true"
+    try: c["price_per_million_tokens"] = float(c.get("price_per_million_tokens") or 0)
+    except ValueError: c["price_per_million_tokens"] = 0.0
     return c
 
 
@@ -397,6 +409,7 @@ def start_blockers(tid, allt, c):
 def set_feature_status(f, new):
     if new not in FEATURE_STATUSES: fail(f"feature status must be one of {FEATURE_STATUSES}")
     if f.get("status") != new: set_value(f, "status", new)
+    if new == "accepted" and not f.get("accepted"): set_value(f, "accepted", now("%Y-%m-%d"))
 
 
 def feature_rollup(fid, allt):
@@ -443,6 +456,11 @@ def ensure_root():
             src = os.path.join(TEMPLATES, name)
             if os.path.exists(src): shutil.copy(src, p)
             elif name == "INBOX.md": write(p, "# Inbox\n\nTwo-line notes from workers about problems outside their ticket. The reproducer turns these into draft tickets.\n")
+    sdir = os.path.join(ROOT, SCORERS_DIR); tdir = os.path.join(TEMPLATES, "scorers")
+    if os.path.isdir(tdir):
+        os.makedirs(sdir, exist_ok=True)
+        for name in os.listdir(tdir):
+            if not os.path.exists(os.path.join(sdir, name)): shutil.copy(os.path.join(tdir, name), os.path.join(sdir, name))
     gi = os.path.join(ROOT, ".gitignore")
     if not os.path.exists(gi): write(gi, "dashboard.html\n.pr-*.pending\n.lock\n*.tmp\n")
 
@@ -601,7 +619,7 @@ def cmd_next(a):
 
 def cmd_log(a):
     vals = {"Ticket": a.id, "Attempt": a.attempt, "Ended": now(), "Minutes": a.minutes, "Questions asked": a.questions, "Returned by checker": a.returned,
-            "Defects found after acceptance": a.defects, "Restarts recovered": a.restarts, "Tokens (if known)": a.tokens or ""}
+            "Defects found after acceptance": a.defects, "Restarts recovered": a.restarts, "Tokens (if known)": a.tokens or "", "Role": a.role}
     append(os.path.join(ROOT, "RUN.md"), "| " + " | ".join(str(vals.get(c, "")).replace("|", "/") for c in RUN_COLS) + " |\n"); print("logged", a.id)
 
 
@@ -668,16 +686,18 @@ def cmd_feature_summary(a):
 # ---------------------------------------------------------------- commands: decisions
 
 def cmd_precedent(a):
-    ds = parse_decisions()
+    ds = parse_decisions(); by_id = {d["id"]: d for d in ds}
     words = {w for w in re.findall(r"[a-z0-9]{3,}", a.words.lower())} - {"the", "and", "for", "with", "should", "use", "that", "this", "what", "which"}
     scored = []
     for d in ds:
         hay = " ".join(d.get(k, "") for k in ("question", "options", "decided", "why")).lower()
+        o = by_id.get(d.get("overrides", ""))
+        if o: hay += " " + " ".join(o.get(k, "") for k in ("question", "options")).lower()  # an override answers the question it overturned
         score = sum(1 for w in words if w in hay)
-        if score: scored.append((0 if d.get("by") == "person" else 1, -score, d))
-    scored.sort(key=lambda x: (x[0], x[1], x[2]["id"]))
+        if score: scored.append((1 if d.get("overridden_by") else 0, 0 if d.get("by") == "person" else 1, -score, d))
+    scored.sort(key=lambda x: (x[0], x[1], x[2], x[3]["id"]))
     if not scored: print("no precedent found; the panel decides"); return
-    for _, s, d in scored[:5]:
+    for _, _, s, d in scored[:5]:
         flag = " (OVERRIDDEN by " + d["overridden_by"] + ")" if d.get("overridden_by") else ""
         print(f"{d['id']} [{d['by']}, {d['ticket']}, matches {-s}]{flag}: {d.get('question','')} -> {d.get('decided','')} — {d.get('why','')}")
 
@@ -860,9 +880,123 @@ def cmd_rework(a):
     body = replace_section(body, "Outcome", f"The note below is satisfied and nothing else about {a.id} changes: {note_text}")
     if risk == "high": body = replace_section(body, "Constraints", ((section(body, "Constraints") or "").strip() + "\n- High risk inherited from the source: stops for a person before any irreversible step.").strip())
     save_body(t, body)
-    did = decide(tid, question=f"Rework of {a.overrides or a.id}", decided=note_text, why="a person reviewed the result and asked for this", by="person", level="standard", reversible="yes", overrides=a.overrides)
+    old_q = next((d.get("question", "") for d in parse_decisions() if d["id"] == a.overrides), "") if a.overrides else ""
+    did = decide(tid, question=(f"Rework of {a.overrides}: {old_q}" if old_q else f"Rework of {a.id}"), decided=note_text, why="a person reviewed the result and asked for this", by="person", level="standard", reversible="yes", overrides=a.overrides)
     if feature: set_feature_status(load_feature(feature), "rework")
     print(tid); print(f"carries the rework note as {did}" + (f"; {a.overrides} is now overridden" if a.overrides else "") + f". Fill eval.md rows for the note, then: tickets.py ready {tid}")
+
+
+# ---------------------------------------------------------------- scoring (judges grade evidence, by risk-weighted sampling)
+
+def scorers():
+    """tickets/scorers/<name>.md: frontmatter with labels (value, score), passingScore, agents, optional samplingRate."""
+    d = os.path.join(ROOT, SCORERS_DIR); out = {}
+    if not os.path.isdir(d): return out
+    for name in sorted(os.listdir(d)):
+        if not name.endswith(".md"): continue
+        text = read(os.path.join(d, name)); m = FRONTMATTER_RE.match(text)
+        if not m: continue
+        fm, body = m.group(1), m.group(2)
+        labels = {}
+        for lm in re.finditer(r"^  - value: (\S+)\s*\n(?:    description: [^\n]*\n)?    score: ([0-9.]+)", fm, re.M):
+            labels[lm.group(1)] = float(lm.group(2))
+        meta = parse_frontmatter(re.sub(r"^labels:\n(?:  - .*\n|    .*\n)*", "", fm, flags=re.M))
+        out[name[:-3]] = {"labels": labels, "passing": float(meta.get("passingScore") or 1), "agents": meta.get("agents", []) if isinstance(meta.get("agents"), list) else parse_list(meta.get("agents", "")),
+                          "sampling": meta.get("samplingRate"), "body": body.strip(), "description": meta.get("description", "")}
+    return out
+
+
+def score_rows():
+    p = os.path.join(ROOT, "SCORES.md")
+    if not os.path.isfile(p): return []
+    rows = []
+    for r in read(p).splitlines():
+        cells = [c.strip() for c in r.strip().strip("|").split("|")]
+        if len(cells) >= 6 and re.match(r"T-\d+", cells[0]): rows.append({"ticket": cells[0], "scorer": cells[1], "label": cells[2], "score": cells[3], "passed": cells[4], "why": cells[5], "when": cells[6] if len(cells) > 6 else ""})
+    return rows
+
+
+def due_for_scoring(allt, c):
+    """Done tickets with no score yet, chosen by a stable hash against the sampling rate for their risk; reworked tickets always."""
+    scored = {r["ticket"] for r in score_rows()}
+    overridden_tickets = {d["ticket"] for d in parse_decisions() if d.get("overridden_by")}
+    due = []
+    for tid, t in sorted(allt.items()):
+        if t.get("status") != "done" or tid in scored: continue
+        rate = int(c["scoring"].get(t.get("risk", "low"), 25))
+        always = tid in overridden_tickets or any(x.get("title", "").startswith(f"Rework {tid}") for x in allt.values())
+        bucket = int(tid[2:]) * 37 % 100  # stable: the same ticket is always in or out, whatever the day
+        if always or bucket < rate: due.append((tid, "reworked" if always else f"{rate}% sample"))
+    return due
+
+
+def cmd_sample(a):
+    allt = load_all(); c = config(); sc = scorers()
+    if not sc: print("no scorers in tickets/scorers/ (tickets.py init copies the defaults)"); return
+    due = due_for_scoring(allt, c)
+    if not due: print("nothing due: every sampled done ticket is scored"); return
+    for tid, why in due: print(f"{tid} ({why}): " + ", ".join(sc))
+
+
+def cmd_score(a):
+    allt = load_all(); sc = scorers()
+    if a.id not in allt: fail(f"unknown ticket {a.id}")
+    if a.scorer not in sc: fail(f"unknown scorer '{a.scorer}'; have: {', '.join(sc) or 'none'}")
+    labels = sc[a.scorer]["labels"]
+    if a.label not in labels: fail(f"label must be one of {', '.join(labels)}")
+    val = labels[a.label]; passed = "yes" if val >= sc[a.scorer]["passing"] else "no"
+    p = os.path.join(ROOT, "SCORES.md")
+    if not os.path.isfile(p): write(p, template("SCORES.md") if os.path.isfile(os.path.join(TEMPLATES, "SCORES.md")) else "# Scores\n\n| Ticket | Scorer | Label | Score | Passed | Why | When |\n|---|---|---|---|---|---|---|\n")
+    append(p, f"| {a.id} | {a.scorer} | {a.label} | {val:g} | {passed} | {one_line(a.why, '--why').replace('|', '/')} | {now()} |\n")
+    note(a.id, f"scored {a.scorer}: {a.label} ({'pass' if passed == 'yes' else 'FAIL'})")
+    if passed == "no": append(os.path.join(ROOT, "INBOX.md"), f"- {now()} score FAIL on {a.id} by {a.scorer}: {a.label} — {one_line(a.why, '--why')}\n")
+    print(f"{a.id}: {a.scorer} -> {a.label} ({val:g}, {'pass' if passed == 'yes' else 'FAIL'})")
+
+
+# ---------------------------------------------------------------- benchmarks (a finished ticket is a replayable task)
+
+def bench_rows():
+    p = os.path.join(ROOT, "BENCH.md")
+    if not os.path.isfile(p): return []
+    rows = []
+    for r in read(p).splitlines():
+        cells = [c.strip() for c in r.strip().strip("|").split("|")]
+        if len(cells) >= 6 and re.match(r"T-\d+", cells[0]): rows.append({"ticket": cells[0], "model": cells[1], "passed": cells[2], "minutes": cells[3], "tokens": cells[4], "when": cells[5]})
+    return rows
+
+
+def cmd_bench(a):
+    allt = load_all(); c = config(); bdir = os.path.join(ROOT, BENCH_DIR)
+    if a.action == "add":
+        if a.id not in allt: fail(f"unknown ticket {a.id}")
+        t = allt[a.id]
+        if t.get("status") != "done": fail(f"{a.id} is {t.get('status')}; a benchmark task is a done ticket")
+        r = subprocess.run(["git", "log", "--format=%H", "--grep", f"^{a.id}:", "-n", "1", c["branch"]], cwd=MAIN, capture_output=True, text=True)
+        merge = r.stdout.strip()
+        if not merge: fail(f"no commit titled '{a.id}: …' on {c['branch']}; was it merged by the merger?")
+        base = subprocess.run(["git", "rev-parse", f"{merge}^"], cwd=MAIN, capture_output=True, text=True).stdout.strip()
+        d = os.path.join(bdir, a.id); os.makedirs(d, exist_ok=True)
+        for f in ("rd.md", "eval.md"): shutil.copy(os.path.join(ROOT, a.id, f), os.path.join(d, f))
+        checks = subprocess.run(["git", "show", f"{base}:tickets/checks.sh"], cwd=MAIN, capture_output=True, text=True)
+        if checks.returncode == 0: write(os.path.join(d, "checks.sh"), checks.stdout)
+        rows = [x for x in run_rows() if x["Ticket"] == a.id and x.get("Role", "worker") in ("worker", "")]
+        budget = t.get("budget") if isinstance(t.get("budget"), dict) else {}
+        orig = ", ".join(x["Minutes"] + " min, " + (x["Tokens (if known)"] or "tokens unknown") for x in rows) or "not logged"
+        write(os.path.join(d, "task.md"), f"# Benchmark task {a.id}: {t.get('title','')}\n\n- Base commit: `{base}` (the integration branch before `{merge[:8]}`)\n- Kind: {t.get('kind')} · risk: {t.get('risk')} · budget: {budget.get('minutes','?')} min · owns: {', '.join(t.get('owns', []))}\n- Original run: {orig}\n\nReplay: `git worktree add -b bench/{a.id}-<model> <path> {base}`, run a worker on `rd.md` from this folder with the model under test, then `tickets.py gate` and the checker against this `eval.md`; record with `tickets.py bench record {a.id} --model <model> --passed <rows passed>/<rows> --minutes N --tokens N`.\n\n## Request\n\n{t['_body'].strip()}\n")
+        print(a.id); print(f"benchmark task in tickets/bench/{a.id}/ (base {base[:8]})")
+    elif a.action == "list":
+        if not os.path.isdir(bdir) or not os.listdir(bdir): print("no benchmark tasks yet: tickets.py bench add T-0xx"); return
+        rows = bench_rows()
+        for tid in sorted(os.listdir(bdir)):
+            runs = [x for x in rows if x["ticket"] == tid]
+            print(f"{tid}: {len(runs)} replay(s)" + ("; " + ", ".join(f"{x['model']} {x['passed']} in {x['minutes']} min" for x in runs) if runs else ""))
+    elif a.action == "record":
+        if not os.path.isdir(os.path.join(bdir, a.id)): fail(f"{a.id} is not a benchmark task (tickets.py bench add {a.id})")
+        if not re.match(r"^\d+/\d+$", a.passed): fail("--passed is rows passed over rows, like 7/8")
+        p = os.path.join(ROOT, "BENCH.md")
+        if not os.path.isfile(p): write(p, template("BENCH.md") if os.path.isfile(os.path.join(TEMPLATES, "BENCH.md")) else "# Benchmarks\n\n| Task | Model | Passed | Minutes | Tokens | When |\n|---|---|---|---|---|---|\n")
+        append(p, f"| {a.id} | {a.model} | {a.passed} | {a.minutes} | {a.tokens or ''} | {now()} |\n"); print(f"recorded {a.id} on {a.model}: {a.passed}")
+    else: fail("bench action must be add, list or record")
 
 
 # ---------------------------------------------------------------- commands: stats, dashboard
@@ -873,7 +1007,7 @@ def run_rows():
     rows = []
     for r in read(p).splitlines():
         cells = [c.strip() for c in r.strip().strip("|").split("|")]
-        if len(cells) >= len(RUN_COLS) and re.match(r"T-\d+", cells[0]): rows.append(dict(zip(RUN_COLS, cells)))
+        if len(cells) >= 9 and re.match(r"T-\d+", cells[0]): rows.append({c: (cells[i] if i < len(cells) else "") for i, c in enumerate(RUN_COLS)})
     return rows
 
 
@@ -887,13 +1021,35 @@ def stats_text(only=None):
     for d in ds: by[d["by"]] = by.get(d["by"], 0) + 1
     council = [d for d in ds if d["by"] in ("council", "arbiter")]; overridden = [d for d in council if d.get("overridden_by")]
     votes = [v for t in allt for v in parse_votes(t)]
+    c = config(); price = c["price_per_million_tokens"]
+    toks = [(r, float(r["Tokens (if known)"])) for r in rows if re.match(r"^\d+(\.\d+)?$", r["Tokens (if known)"] or "")]
+    total_tokens = sum(v for _, v in toks)
+    by_role = {}
+    for r, v in toks: by_role[r.get("Role") or "worker"] = by_role.get(r.get("Role") or "worker", 0) + v
+    merged = len(done) or 1
+    cost_line = (f"- Tokens logged: {int(total_tokens):,} over {len(toks)} attempts" + (f" = ${total_tokens / 1e6 * price:,.2f} at ${price:g}/M; ${total_tokens / 1e6 * price / merged:,.2f} per merged ticket" if price else " (set price_per_million_tokens in CONFIG.md for money)")
+                 + (" · by role: " + ", ".join(f"{k} {100 * v / total_tokens:.0f}%" for k, v in sorted(by_role.items(), key=lambda kv: -kv[1])) if total_tokens else "")) if toks else "- Tokens: none logged (merger: tickets.py log … --tokens N --role worker; panels and reviews log their own)"
+    sc = score_rows(); sc_only = [r for r in sc if only is None or r["ticket"] in only]
+    per = {}
+    for r in sc_only: per.setdefault(r["scorer"], []).append(r["passed"] == "yes")
+    score_line = "- Scores: " + (", ".join(f"{k} {sum(v)}/{len(v)} pass" for k, v in sorted(per.items())) if per else "none yet (tickets.py sample, then the scorer role)")
+    feats = [load_feature(f) for f in feature_ids()] if only is None else []
+    cyc = []
+    for f in feats:
+        if f.get("requested") and f.get("accepted"):
+            try: cyc.append((datetime.date.fromisoformat(f["accepted"]) - datetime.date.fromisoformat(f["requested"])).days)
+            except ValueError: pass
+    cycle_line = f"- Cycle time, request to accepted: median {sorted(cyc)[len(cyc) // 2]} days over {len(cyc)} features" if cyc else "- Cycle time: no feature accepted yet"
+    br = bench_rows()
+    bench_line = ("- Benchmarks: " + ", ".join(f"{m} {sum(int(x['passed'].split('/')[0]) for x in br if x['model'] == m)}/{sum(int(x['passed'].split('/')[1]) for x in br if x['model'] == m)} rows" for m in sorted({x['model'] for x in br}))) if br else "- Benchmarks: none replayed yet (tickets.py bench add T-0xx)"
     return "\n".join([
         f"- Tickets: {len(allt)} total, {len(done)} done, {sum(1 for t in allt.values() if t.get('status') == 'blocked')} blocked",
         f"- Attempts logged: {len(rows)}; first-pass (no return by the checker): {first_pass}/{len(rows) or 1} = {100 * first_pass // (len(rows) or 1)}%",
         f"- Minutes per attempt: median {sorted(mins)[len(mins) // 2] if mins else '—'}, total {sum(mins) if mins else '—'}",
         f"- Decisions: {len(ds)} ({', '.join(f'{k} {v}' for k, v in sorted(by.items())) or 'none'})",
         f"- Panel decisions later overridden by a person: {len(overridden)}/{len(council) or 1} = {100 * len(overridden) // (len(council) or 1)}%  (the autonomy health number: high means the panel should escalate earlier in that area)",
-        f"- Reviewer votes: {sum(1 for v in votes if v['vote'] == 'approve')} approve, {sum(1 for v in votes if v['vote'] == 'changes')} changes"])
+        f"- Reviewer votes: {sum(1 for v in votes if v['vote'] == 'approve')} approve, {sum(1 for v in votes if v['vote'] == 'changes')} changes",
+        score_line, cost_line, cycle_line, bench_line])
 
 
 def cmd_stats(a):
@@ -961,7 +1117,8 @@ def cmd_pr(a):
     head = c["branch"]
     marker = os.path.join(ROOT, f".pr-{a.id}.pending"); write(marker, f"{now()} opening PR {head} -> {a.base} for {a.id}\n")  # the intent is on disk before the request exists
     sh(["git", "push", "-u", "origin", head], cwd=MAIN)
-    r = sh(["gh", "pr", "create", "--base", a.base, "--head", head, "--title", title, "--body", body + f"\n\n---\nOpened by the factory from `{head}`. Review the summary; rework by writing in review.md."], cwd=MAIN)
+    subprocess.run(["gh", "label", "create", "factory", "--description", "Opened by the ticket factory", "--color", "5319e7"], cwd=MAIN, capture_output=True, text=True)  # exists already: fine
+    r = sh(["gh", "pr", "create", "--base", a.base, "--head", head, "--title", title, "--label", "factory", "--body", body + f"\n\n---\nOpened by the factory from `{head}`. Review the summary; rework by writing in review.md."], cwd=MAIN)
     url = r.stdout.strip().splitlines()[-1]
     set_value(rec, "pr", url); os.remove(marker); print(url)
 
@@ -993,7 +1150,13 @@ def main():
     s = sub.add_parser("vote", help="record a reviewer's vote in eval.md"); s.add_argument("id"); s.add_argument("--role", required=True, help="one of the ticket's reviews, or arbiter"); s.add_argument("--vote", required=True, choices=["approve", "changes"]); s.add_argument("--why", required=True); s.set_defaults(f=cmd_vote)
     s = sub.add_parser("verdict", help="approve (0) | changes (2) | escalate (3)"); s.add_argument("id"); s.set_defaults(f=cmd_verdict)
     s = sub.add_parser("rework", help="a new ticket carrying a person's note; overrides a decision"); s.add_argument("id", help="F- or T- id"); s.add_argument("--note", required=True, help="the person's words, verbatim"); s.add_argument("--overrides", default="", help="the D- id the note overturns"); s.add_argument("--owns", default=""); s.add_argument("--risk", default="", choices=[""] + RISKS); s.add_argument("--kind", default="", choices=[""] + KINDS); s.set_defaults(f=cmd_rework)
-    s = sub.add_parser("log", help="append an attempt to RUN.md"); s.add_argument("id"); s.add_argument("--attempt", default=1, type=int); s.add_argument("--minutes", required=True); s.add_argument("--questions", default=0); s.add_argument("--returned", default=0); s.add_argument("--defects", default=0); s.add_argument("--restarts", default=0); s.add_argument("--tokens", default=""); s.set_defaults(f=cmd_log)
+    s = sub.add_parser("log", help="append an attempt to RUN.md"); s.add_argument("id"); s.add_argument("--attempt", default=1, type=int); s.add_argument("--minutes", required=True); s.add_argument("--questions", default=0); s.add_argument("--returned", default=0); s.add_argument("--defects", default=0); s.add_argument("--restarts", default=0); s.add_argument("--tokens", default=""); s.add_argument("--role", default="worker", choices=ROLES); s.set_defaults(f=cmd_log)
+    sub.add_parser("sample", help="done tickets due for scoring").set_defaults(f=cmd_sample)
+    s = sub.add_parser("score", help="record a judge's label for a ticket"); s.add_argument("id"); s.add_argument("--scorer", required=True); s.add_argument("--label", required=True); s.add_argument("--why", required=True); s.set_defaults(f=cmd_score)
+    bp = sub.add_parser("bench", help="benchmarks: add, list, record"); bs = bp.add_subparsers(dest="action", required=True)
+    x = bs.add_parser("add"); x.add_argument("id"); x.set_defaults(f=cmd_bench)
+    bs.add_parser("list").set_defaults(f=cmd_bench)
+    x = bs.add_parser("record"); x.add_argument("id"); x.add_argument("--model", required=True); x.add_argument("--passed", required=True, help="rows passed over rows, like 7/8"); x.add_argument("--minutes", required=True); x.add_argument("--tokens", default=""); x.set_defaults(f=cmd_bench)
     sub.add_parser("stats", help="run figures").set_defaults(f=cmd_stats)
     sub.add_parser("dashboard", aliases=["html"], help="write tickets/dashboard.html").set_defaults(f=cmd_dashboard)
     s = sub.add_parser("import-issue", help="a draft ticket from a GitHub issue"); s.add_argument("number", type=int); s.add_argument("--kind", default="code", choices=KINDS); s.add_argument("--feature", default=""); s.set_defaults(f=cmd_import_issue)

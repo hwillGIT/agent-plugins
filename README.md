@@ -14,7 +14,11 @@ An autonomous ticket pipeline. You say what to build; the intake writes the feat
 /factory rework F-001 D-014 is wrong: exports stay CSV
 /factory accept F-001
 /factory map our release process    redesign a process before adding agents to it
-/factory stats                      throughput, first-pass rate, and the share of panel decisions you overrode
+/factory stats                      throughput, first-pass rate, cost per merged ticket, the share of panel decisions you overrode
+/factory score                      run the judges on the sampled finished tickets
+/factory improve                    one proposed change to the factory, with the counts behind it
+/factory bench opus sonnet          replay finished tickets under each model; quality against cost
+/factory setup --github             issue-label intake, @factory comments, CI-failure triage, a weekly audit
 ```
 
 What never happens without a person: a push to `main`, a deploy, a migration, deleting data, money, posting outside the repository, changing permissions. A hook enforces it in any repository that has `tickets/CONFIG.md`.
@@ -59,8 +63,10 @@ plugins/factory/
   skills/ticket-router/scripts/tickets.py   the only writer of ticket state (standard library)
   skills/ticket-router/templates/    CONFIG.md, DECISIONS.md, feature.md, review.md, rd.md, eval.md, checks.sh, …
   skills/outcome-map/SKILL.md        process redesign before agents
-  agents/                            router, intake, worker, panelist, arbiter, watchdog, checker, reviewer, merger, summarizer, reproducer, lens
-  hooks/hooks.json + scripts/guard.py   the never-automated list, enforced
+  agents/                            router, intake, worker, panelist, arbiter, watchdog, checker, reviewer, merger, summarizer, reproducer, lens, scorer, improver
+  skills/ticket-router/templates/scorers/   the three judges; templates/github/factory.yml the automations
+  hooks/hooks.json + scripts/guard.py   the never-automated list and the MCP allowlist, enforced
+tests/test_tickets.sh                the factory's own regression test (CI runs it)
 ```
 
 ## Changing it

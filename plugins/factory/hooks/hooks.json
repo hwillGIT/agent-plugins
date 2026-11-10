@@ -6,6 +6,12 @@
         "hooks": [
           { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/guard.py" }
         ]
+      },
+      {
+        "matcher": "mcp__.*",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/guard.py" }
+        ]
       }
     ],
     "TaskCompleted": [

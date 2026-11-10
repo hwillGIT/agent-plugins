@@ -1,0 +1,98 @@
+# Event intake and standing automations for the ticket factory, run by GitHub Actions.
+# Written by "/factory setup --github". Needs one repository secret: ANTHROPIC_API_KEY (or use
+# claude_code_oauth_token). The plugin installs itself from the marketplace on each run; the guard hook
+# applies; promote stays "pr", so a person still merges.
+name: factory
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+  workflow_run:
+    workflows: ["*"]
+    types: [completed]
+    branches: [integration]
+  schedule:
+    - cron: "17 9 * * 1"   # Monday 09:17 UTC: dependency audit
+  workflow_dispatch:
+    inputs:
+      request:
+        description: "What to run, in factory words (build …, review F-001, rework F-001 …)"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  intake:
+    if: github.event_name == 'issues' && github.event.label.name == 'factory-ready'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          plugin_marketplaces: https://github.com/hwillGIT/agent-plugins.git
+          plugins: factory@hwillgit
+          prompt: "/factory build #${{ github.event.issue.number }}"
+          claude_args: "--max-turns 200"
+
+  comment:
+    if: github.event_name == 'issue_comment' && contains(github.event.comment.body, '@factory')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          plugin_marketplaces: https://github.com/hwillGIT/agent-plugins.git
+          plugins: factory@hwillgit
+          prompt: "A person commented on #${{ github.event.issue.number }}: ${{ github.event.comment.body }}. If it is a rework note on a delivered feature, run /factory rework; if it asks a question, answer it from the ledger with /factory decide; otherwise /factory build."
+          claude_args: "--max-turns 200"
+
+  ci-failure:
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          plugin_marketplaces: https://github.com/hwillGIT/agent-plugins.git
+          plugins: factory@hwillgit
+          prompt: "/factory bug A workflow run failed on the integration branch: ${{ github.event.workflow_run.html_url }}. Read its logs, reproduce the failure as a failing test, and draft the ticket; do not fix it."
+          claude_args: "--max-turns 80"
+
+  weekly-audit:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          plugin_marketplaces: https://github.com/hwillGIT/agent-plugins.git
+          plugins: factory@hwillgit
+          prompt: "/factory build Weekly dependency audit: list outdated and vulnerable dependencies, apply safe minor and patch upgrades, run the checks, and leave anything needing a decision as a question for the panel."
+          claude_args: "--max-turns 120"
+
+  dispatch:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          plugin_marketplaces: https://github.com/hwillGIT/agent-plugins.git
+          plugins: factory@hwillgit
+          prompt: "/factory ${{ github.event.inputs.request }}"
+          claude_args: "--max-turns 200"

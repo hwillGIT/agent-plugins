@@ -1,0 +1,28 @@
+# The factory definition is tested like the software it builds: the plugin manifest against Claude Code's
+# validator, and the state script through its full lifecycle in a scratch repository.
+name: validate
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 9 * * 1"   # weekly drift check against the current Claude Code release
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }   # the oldest Python the script must run on
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Validate the plugin and the marketplace
+        run: |
+          claude plugin validate ./plugins/factory
+          claude plugin validate .
+      - name: Lifecycle test of tickets.py and guard.py
+        run: |
+          git config --global user.email ci@example.com && git config --global user.name ci
+          bash tests/test_tickets.sh

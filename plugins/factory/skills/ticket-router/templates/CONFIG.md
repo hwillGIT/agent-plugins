@@ -29,6 +29,12 @@ reviews_by_surface:
   screen: [quality, accessibility, performance]
   data: [quality, security, schema]
   document: [reader]
+scoring:                   # share of done tickets a scorer judges, by risk; a reworked ticket is always scored
+  low: 25
+  medium: 50
+  high: 100
+price_per_million_tokens: 0  # blended $/M tokens for your plan; 0 leaves cost lines in tokens only
+mcp_allowlist: []            # empty: no restriction. Named: in this repository, agents may call only these MCP servers (e.g. [github, playwright])
 always_escalate:
   - an irreversible step or one outside the repository: deploy, migration, deleting data, money, messages, permissions
   - reversing a decision a person made (a D- entry with by: person)

@@ -20,7 +20,7 @@ Use it when a feature has three or more tickets whose `owns` paths do not overla
 1. `T init` creates `tickets/` with `CONFIG.md`, `DECISIONS.md`, `BOARD.md`, `RUN.md`, `ALLOWLIST.md`, `INBOX.md`, `checks.sh` and `features/`. Commit it.
 2. Edit `tickets/checks.sh` to the project's lint, type check, tests and build. It is the gate; keep it under five minutes.
 3. Read `tickets/CONFIG.md`: the integration branch, how a finished feature reaches `main` (`promote: pr` by default), concurrency, the models, the decision levels, the approval rule by risk, and the list of what always goes to a person.
-4. The twelve roles are the plugin's agents (`factory:router` and the rest); without the plugin copy `agents/` into `.claude/agents/`.
+4. The fourteen roles are the plugin's agents (`factory:router` and the rest); without the plugin copy `agents/` into `.claude/agents/`.
 5. Optional: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` lets workers message each other and self-claim; the workflow runs without it on ordinary subagents.
 
 ## 2. Four authorities
@@ -79,13 +79,29 @@ Every worker runs in a worktree on branch `ticket/<id>` and changes only paths u
 
 `T stats` prints throughput, the first-pass rate (tickets the checker did not return), minutes per attempt, decisions by who made them, and the number that matters most for autonomy: the share of panel decisions a person later overrode. A high share in one area says the panel should escalate earlier there — add the area to `always_escalate`. `T dashboard` writes `tickets/dashboard.html` with the board, the features, the decisions and these figures. Keep a baseline row in `RUN.md` for the same kind of ticket done in one ordinary session, and compare after ten tickets, not one.
 
+## 9a. Measure and improve
+
+Three ledgers sit beside the run log, and three roles read them.
+
+**Scorers** (`tickets/scorers/*.md`, three shipped: task compliance, evidence quality, review quality) are judges with labels and scores, a passing score, and a body that says what to read. `T sample` names the done tickets due — every high-risk ticket, half the medium, a quarter of the low (`scoring` in CONFIG.md), and every ticket a person later reworked — and the router spawns a cheap `scorer` per ticket and scorer after each merge. A scorer reads the request, the ticket, the merged diff and the evidence, never the worker's account; `T score` writes the row to `SCORES.md`, and a failing score goes to `INBOX.md`. Write your own scorer by copying one: the labels are the rubric, the body is the instruction.
+
+**The improver** is factory engineering as a role: every ten merged tickets, or on "factory: improve", it reads `stats`, the failing scores, the inbox, the ledger's overridden entries and the run log, and looks for the same failure in three or more places. It proposes one change — a line of context in a role file, a check in `checks.sh` or `eval.md`, a scorer, a guard pattern, a model or sampling rate — as a feature request with the counts and files that justify it, and that feature runs through the pipeline like any other, reviewed by a person in its summary. A change to the plugin is a feature in the plugin repository; a change to this repository's `tickets/` is a feature here. No counts, no proposal.
+
+**Benchmarks** are finished tickets. `T bench add T-0xx` snapshots the base commit, `rd.md`, `eval.md` and the checks of the day; a replay is a worker started from that commit under the model being tested, scored by the same gate and checker, recorded with `T bench record` as rows passed, minutes and tokens. `stats` then shows quality against cost per model on your own code, which is what a model choice in `CONFIG.md` should rest on.
+
+**Cost** is tokens until you set `price_per_million_tokens` in CONFIG.md; then `stats` prints cost per merged ticket and the share spent by role (worker, panel, review, score). The merger logs the worker's count from `notes.md`; a missing count stays blank.
+
+## 9b. Automations
+
+`T`-driven work needs someone to type `/factory build`. `templates/github/factory.yml` (installed by "factory: setup --github") lets GitHub do it: an issue labelled `factory-ready` runs `/factory build #N`; `@factory` in an issue comment runs a rework or an answer; a failed workflow on the integration branch runs `/factory bug`; a Monday schedule runs a dependency audit; a manual dispatch runs any factory request. The action installs this plugin from the marketplace on each run, the guard hook applies, and `promote: pr` still leaves the merge to a person. The repository needs one secret (`ANTHROPIC_API_KEY` or an OAuth token), which a person adds.
+
 ## 10. GitHub
 
 `T import-issue 42` drafts a ticket from an issue whose author is on `ALLOWLIST.md`; labels `risk:high` and `risk:medium` set the risk. `T pr F-0xx` pushes the integration branch and opens the pull request with the summary as its body, recording the intent in `tickets/.pr-F-0xx.pending` before the request exists so a crash between the two steps leaves a trace. Both need the `gh` CLI signed in.
 
 ## 11. Hooks the plugin installs
 
-`hooks/hooks.json` runs `scripts/guard.py` before any Bash command in a repository that has `tickets/CONFIG.md`: it stops a push to `main` or `master`, a force push, a branch deletion on the remote, and the common destructive commands (`rm -rf` outside the worktree, `DROP`, `terraform apply`, `kubectl apply`) — the never-automated list, enforced rather than trusted. A person runs those from their own terminal. On `TaskCompleted` (agent teams) it refuses to close a task named for a ticket whose `eval.md` carries no accepted verdict.
+`hooks/hooks.json` runs `scripts/guard.py` before any Bash command and before any MCP tool call in a repository that has `tickets/CONFIG.md`. For MCP: when `mcp_allowlist` in CONFIG.md names servers, any other server is refused in that repository (your own sessions elsewhere are untouched). For Bash: it stops a push to `main` or `master`, a force push, a branch deletion on the remote, and the common destructive commands (`rm -rf` outside the worktree, `DROP`, `terraform apply`, `kubectl apply`) — the never-automated list, enforced rather than trusted. A person runs those from their own terminal. On `TaskCompleted` (agent teams) it refuses to close a task named for a ticket whose `eval.md` carries no accepted verdict.
 
 ## 12. The roles
 
@@ -103,5 +119,7 @@ Every worker runs in a worktree on branch `ticket/<id>` and changes only paths u
 | summarizer | sonnet | What was built, what to look at | Changes a decision or verdict |
 | reproducer | sonnet | Failing test and draft ticket from a bug or an INBOX line | Fixes the bug |
 | lens | sonnet | Brainstorm note for ticket writing | Writes tickets |
+| scorer | haiku | One label per ticket and scorer, from evidence | Reads the worker's account; changes anything |
+| improver | opus | One proposed change to the factory, with counts | Edits the factory directly |
 
 The checker and the arbiter are not the places to save money: acceptance is where quality is decided, and the arbiter is where a cheap model turns a panel into a coin toss.

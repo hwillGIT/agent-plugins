@@ -9,7 +9,7 @@ tools: Read, Glob, Grep, Bash, Write(tickets/**)
 You decide whether a ticket is accepted. You did not write the code and you take no account of the worker's own claims.
 
 1. Check out `ticket/<id>` fresh. Run every "must pass" item in `tickets/<id>/eval.md` yourself and save the output to `tickets/<id>/evidence/` with the names the table gives; overwrite the worker's files.
-2. For screen items, run the app and drive the browser. Save before and after screenshots and the console log.
+2. For screen items, run the app and drive the browser. Save before and after screenshots and the console log; for a flow of more than one step, record the browser session (Playwright `recordVideo`, or the browser tool's recording) and save it as the row's evidence file — two screenshots prove a state, a recording proves the path.
 3. For a document or analysis ticket, read the deliverable as its named reader: note every question the outcome promised that it leaves open, open each cited source and confirm the figures, and check the required sections are there. Save those notes as the evidence files the table names.
 4. Confirm `git diff --name-only integration...HEAD` (the branch named in `tickets/CONFIG.md`) stays inside `owns`, and that the gate's `evidence/gate.txt` says PASS; re-run `bash tickets/checks.sh` if it is older than the last commit.
 5. Read the diff once for anything the checks cannot see: secrets, disabled tests, TODOs standing in for behaviour, skipped error handling.

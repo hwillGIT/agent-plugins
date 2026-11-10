@@ -3,6 +3,7 @@
 
 Active only in a repository that has tickets/CONFIG.md (a factory repository); elsewhere it allows everything.
 
+PreToolUse (mcp__*): when tickets/CONFIG.md names an mcp_allowlist, exit 2 for any MCP server not on it.
 PreToolUse (Bash): exit 2 on a push to main/master, a force push, a remote branch deletion, destroying the
 integration or main branch, a recursive delete outside the working directory, destructive SQL, deploys and
 infrastructure changes, migrations, and GitHub deletions or permission changes. Each segment of a compound
@@ -49,6 +50,26 @@ def check_bash(cmd, cwd):
     return None
 
 
+def mcp_allowlist(root):
+    """The mcp_allowlist from tickets/CONFIG.md's yaml block: a list of server names, or [] for no restriction."""
+    try: text = open(os.path.join(root, "tickets", "CONFIG.md"), encoding="utf-8").read()
+    except OSError: return []
+    m = re.search(r"^mcp_allowlist:\s*(\[[^\]]*\])?\s*(?:#.*)?$((?:\n  - [^\n]*)*)", text, re.M)
+    if not m: return []
+    inline = [x.strip() for x in (m.group(1) or "").strip("[]").split(",") if x.strip()]
+    block = re.findall(r"^  - ([^\n#]+)", m.group(2) or "", re.M)
+    return [x.strip() for x in inline + block if x.strip()]
+
+
+def check_mcp(root, tool_name):
+    """The reason an MCP tool is refused, or None: the server (second segment of mcp__<server>__<tool>) is not on the allowlist."""
+    allowed = mcp_allowlist(root)
+    if not allowed or not tool_name.startswith("mcp__"): return None
+    server = tool_name.split("__")[1] if tool_name.count("__") >= 2 else tool_name
+    if server.lower() in {a.lower() for a in allowed}: return None
+    return f"MCP server '{server}' is not in tickets/CONFIG.md mcp_allowlist ({', '.join(allowed)}); add it there if this repository's agents may use it."
+
+
 def check_task(root, text):
     """The reason a task naming a ticket may not close, or None. Fails closed when the evidence is missing."""
     ids = sorted(set(re.findall(r"\b(T-\d{3,})\b", text)))
@@ -70,7 +91,9 @@ def main():
     if not os.path.isfile(os.path.join(root, "tickets", "CONFIG.md")): return 0
     name = event.get("hook_event_name", "")
     why = None
-    if name == "PreToolUse": why = check_bash((event.get("tool_input") or {}).get("command", "") or "", root)
+    if name == "PreToolUse":
+        tool = event.get("tool_name", "") or ""
+        why = check_mcp(root, tool) if tool.startswith("mcp__") else check_bash((event.get("tool_input") or {}).get("command", "") or "", root)
     elif name == "TaskCompleted": why = check_task(root, " ".join(str(event.get(k, "")) for k in ("task_subject", "task_description")))
     if why: print("factory guard: " + why, file=sys.stderr); return 2
     return 0
