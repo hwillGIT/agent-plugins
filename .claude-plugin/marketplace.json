@@ -1,0 +1,15 @@
+{
+  "name": "hwillgit",
+  "description": "Hubert Williams's Claude Code plugins: the ticket factory and the skills it runs.",
+  "owner": { "name": "Hubert Williams", "url": "https://github.com/hwillGIT" },
+  "metadata": { "pluginRoot": "./plugins" },
+  "plugins": [
+    {
+      "name": "factory",
+      "source": "./plugins/factory",
+      "description": "Autonomous ticket pipeline with a decision panel, consensus approval and a reviewable feature summary. Front door: /factory.",
+      "category": "workflow",
+      "tags": ["tickets", "agents", "sdlc", "consensus"]
+    }
+  ]
+}

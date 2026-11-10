@@ -1,0 +1,10 @@
+{
+  "name": "factory",
+  "displayName": "Ticket Factory",
+  "version": "3.0.0",
+  "description": "Autonomous ticket pipeline: a router that never codes, a decision panel that settles questions against precedent, a gate, a checker and reviewers that accept by consensus, a merger, and a feature summary the person reviews and reworks. One front door: /factory.",
+  "author": { "name": "Hubert Williams", "url": "https://github.com/hwillGIT" },
+  "repository": "https://github.com/hwillGIT/agent-plugins",
+  "license": "MIT",
+  "keywords": ["tickets", "agents", "sdlc", "router", "consensus", "software-factory"]
+}
