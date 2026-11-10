@@ -21,7 +21,13 @@ What never happens without a person: a push to `main`, a deploy, a migration, de
 
 ## Install
 
-On any machine with Claude Code:
+On any Mac or Linux machine with Claude Code, one line:
+
+```
+curl -fsSL https://raw.githubusercontent.com/hwillGIT/agent-plugins/main/install.sh | bash
+```
+
+Or by hand, on any machine including Windows:
 
 ```
 claude plugin marketplace add hwillGIT/agent-plugins
